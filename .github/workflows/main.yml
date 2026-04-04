@@ -1,0 +1,28 @@
+name: Update Planning
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # tous les jours à 6h
+  workflow_dispatch:
+
+jobs:
+  scrape-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install aiohttp playwright firebase-admin
+          playwright install
+
+      - name: Create Firebase key
+        run: echo '${{ secrets.FIREBASE_KEY }}' > serviceAccountKey.json
+
+      - name: Run scraper & upload
+        run: python scrape_and_upload_planning.py
