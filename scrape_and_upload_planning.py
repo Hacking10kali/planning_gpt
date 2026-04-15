@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -69,7 +70,7 @@ async def resolve_ids(session: aiohttp.ClientSession, titre: str):
     return {"mal_id": None, "imdb_id": imdb_id}
 
 
-# ── 🔥 EPISODE (VERSION STABLE SANS GO_BACK) ──
+# ── 🔥 EPISODE FIX FINAL ──────────────────────
 async def get_next_episode(context, href: str):
     try:
         if not href:
@@ -87,9 +88,15 @@ async def get_next_episode(context, href: str):
 
         episodes = []
         for opt in options:
+            text = await opt.inner_text()
             value = await opt.get_attribute("value")
+
             if value and value.isdigit():
                 episodes.append(int(value))
+            elif text:
+                match = re.search(r'\d+', text)
+                if match:
+                    episodes.append(int(match.group()))
 
         await page.close()
 
@@ -140,16 +147,15 @@ async def scrape_planning_page(page, context, session):
             if await carte.query_selector('img[title="VOSTFR"]'):
                 langues.append("VOSTFR")
 
-            # 🔥 LINK
+            # 🔥 lien
             link_elem = await carte.query_selector("a")
             href = await link_elem.get_attribute("href") if link_elem else None
 
-            # 🔥 EPISODE
+            # 🔥 épisode
             next_episode = None
             if href:
                 next_episode = await get_next_episode(context, href)
 
-            # IDS
             ids = await resolve_ids(session, titre)
             await asyncio.sleep(0.5)
 
@@ -181,11 +187,8 @@ async def main():
             browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
 
             context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/124.0.0.0 Safari/537.36",
-                locale="fr-FR",
-                timezone_id="Europe/Paris"
+                user_agent="Mozilla/5.0",
+                locale="fr-FR"
             )
 
             page = await context.new_page()
