@@ -52,7 +52,8 @@ async def get_imdb_id(session: aiohttp.ClientSession, titre: str) -> str | None:
             if resp.status != 200:
                 return None
             data = await resp.json(content_type=None)
-            for r in data.get("d", []):
+            results = data.get("d", [])
+            for r in results:
                 imdb_id = r.get("id", "")
                 if imdb_id.startswith("tt"):
                     return imdb_id
@@ -66,12 +67,16 @@ async def resolve_ids(session: aiohttp.ClientSession, titre: str) -> dict:
     if mal_id:
         return {"mal_id": mal_id, "imdb_id": None}
     imdb_id = await get_imdb_id(session, titre)
-    return {"mal_id": None, "imdb_id": imdb_id}
+    return {"mal_id": None, "imdb_id": imdb_id if imdb_id else None}
 
 
-# ── 🔥 NOUVELLE FONCTION EPISODE ─────────────────
-async def get_next_episode(page, base_url: str, href: str):
+# ── 🔥 AJOUT : FONCTION EPISODE ─────────────────
+async def get_next_episode(page, href: str):
     try:
+        if not href:
+            return None
+
+        base_url = "https://anime-sama.to"
         full_url = base_url.rstrip("/") + href
 
         await page.goto(full_url, wait_until="domcontentloaded", timeout=30000)
@@ -86,24 +91,20 @@ async def get_next_episode(page, base_url: str, href: str):
                 episodes.append(int(value))
 
         if episodes:
-            last_episode = max(episodes)
-            return last_episode + 1
+            return max(episodes) + 1
 
     except Exception as e:
-        print(f"❌ Erreur épisode: {e}")
+        print(f"❌ episode error: {e}")
 
     return None
 
 
 # ── SCRAPE PLANNING ───────────────────────────
-async def scrape_planning_page(page, session: aiohttp.ClientSession):
+async def scrape_planning_page(page, session: aiohttp.ClientSession) -> list[dict]:
     print("📅 Extraction du planning...")
     planning_data = []
 
-    base_url = "https://anime-sama.to"
-
     jours = await page.query_selector_all("div.fadeJours")
-
     for jour in jours:
         titre_elem = await jour.query_selector("h2.titreJours")
         titre_jour = (await titre_elem.inner_text()).strip() if titre_elem else "Jour Inconnu"
@@ -111,7 +112,6 @@ async def scrape_planning_page(page, session: aiohttp.ClientSession):
         jour_data = {"jour": titre_jour, "animes": []}
 
         cartes = await jour.query_selector_all("div.anime-card-premium")
-
         for carte in cartes:
             titre_elem = await carte.query_selector(".card-title")
             titre = (await titre_elem.inner_text()).strip() if titre_elem else "Titre Inconnu"
@@ -130,25 +130,22 @@ async def scrape_planning_page(page, session: aiohttp.ClientSession):
             badge = (await badge_elem.inner_text()).strip() if badge_elem else "Inconnu"
 
             langues = []
-            if await carte.query_selector('img[title="VF"]'):
-                langues.append("VF")
-            if await carte.query_selector('img[title="VOSTFR"]'):
-                langues.append("VOSTFR")
+            if await carte.query_selector('img[title="VF"]'): langues.append("VF")
+            if await carte.query_selector('img[title="VOSTFR"]'): langues.append("VOSTFR")
 
-            # ── 🔥 RECUP LINK ──
+            # ── 🔥 AJOUT : LINK ──
             link_elem = await carte.query_selector("a")
             href = await link_elem.get_attribute("href") if link_elem else None
 
-            # ── 🔥 RECUP EPISODE ──
+            # ── 🔥 AJOUT : EPISODE ──
             next_episode = None
             if href:
-                next_episode = await get_next_episode(page, base_url, href)
+                next_episode = await get_next_episode(page, href)
 
-                # 🔥 revenir à la page principale
+                # ⚠️ IMPORTANT
                 await page.go_back(wait_until="domcontentloaded")
                 await page.wait_for_selector("div.fadeJours")
 
-            # ── IDS ──
             ids = await resolve_ids(session, titre)
             await asyncio.sleep(0.5)
 
@@ -166,6 +163,8 @@ async def scrape_planning_page(page, session: aiohttp.ClientSession):
 
         planning_data.append(jour_data)
 
+    total = sum(len(j["animes"]) for j in planning_data)
+    print(f"   → {len(planning_data)} jour(s), {total} anime(s) traité(s).")
     return planning_data
 
 
@@ -176,7 +175,13 @@ async def main():
     async with aiohttp.ClientSession() as session:
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
-            context = await browser.new_context()
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) "
+                           "Chrome/124.0.0.0 Safari/537.36",
+                locale="fr-FR",
+                timezone_id="Europe/Paris"
+            )
 
             page = await context.new_page()
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
@@ -187,19 +192,18 @@ async def main():
                 print("⚠️ Section planning non trouvée.")
 
             planning = await scrape_planning_page(page, session)
-
             await browser.close()
 
     if planning:
         save_json(planning, "planning_anime_sama.json")
 
         db = init_firebase()
-        db.collection("planning").document("weekly_planning").set({
+        doc_ref = db.collection("planning").document("weekly_planning")
+        doc_ref.set({
             "last_update": datetime.utcnow().isoformat(),
             "jours": planning
         })
-
-        print("🔥 Planning mis à jour !")
+        print("🔥 Planning mis à jour dans Firestore !")
 
 
 if __name__ == "__main__":
