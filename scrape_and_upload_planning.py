@@ -10,6 +10,10 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 
 
+# ── 🔥 BASE URL CENTRALISÉE ─────────────────────
+BASE_URL = "https://anime-sama.to"
+
+
 # ── FIREBASE INIT ───────────────────────────────
 def init_firebase():
     if not firebase_admin._apps:
@@ -28,7 +32,7 @@ def save_json(data, filename: str):
     print(f"💾 Sauvegardé : {path}")
 
 
-# ── ID Lookup ─────────────────────────────────
+# ── MAL ID ────────────────────────────────
 async def get_mal_id(session: aiohttp.ClientSession, titre: str):
     try:
         url = "https://api.jikan.moe/v4/anime"
@@ -45,6 +49,7 @@ async def get_mal_id(session: aiohttp.ClientSession, titre: str):
     return None
 
 
+# ── IMDb ID ────────────────────────────────
 async def get_imdb_id(session: aiohttp.ClientSession, titre: str):
     try:
         query = titre.replace(" ", "_")
@@ -62,22 +67,46 @@ async def get_imdb_id(session: aiohttp.ClientSession, titre: str):
     return None
 
 
+# ── KITSU ID ────────────────────────────────
+async def get_kitsu_id(session: aiohttp.ClientSession, titre: str):
+    try:
+        url = "https://kitsu.io/api/edge/anime"
+        params = {"filter[text]": titre, "page[limit]": 1}
+
+        headers = {"Accept": "application/vnd.api+json"}
+
+        async with session.get(url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status != 200:
+                return None
+
+            data = await resp.json()
+            results = data.get("data", [])
+
+            if results:
+                return results[0].get("id")
+
+    except Exception:
+        return None
+
+    return None
+
+
+# ── RESOLVE IDS ────────────────────────────────
 async def resolve_ids(session: aiohttp.ClientSession, titre: str):
-    mal_id = await get_mal_id(session, titre)
-    if mal_id:
-        return {"mal_id": mal_id, "imdb_id": None}
-    imdb_id = await get_imdb_id(session, titre)
-    return {"mal_id": None, "imdb_id": imdb_id}
+    return {
+        "mal_id": await get_mal_id(session, titre),
+        "imdb_id": await get_imdb_id(session, titre),
+        "kitsu_id": await get_kitsu_id(session, titre)
+    }
 
 
-# ── 🔥 EPISODE FIX FINAL ──────────────────────
+# ── EPISODE (FIX FINAL) ────────────────────────────────
 async def get_next_episode(context, href: str):
     try:
         if not href:
             return None
 
-        base_url = "https://anime-sama.to"
-        full_url = base_url.rstrip("/") + href
+        full_url = BASE_URL.rstrip("/") + href
 
         page = await context.new_page()
 
@@ -87,6 +116,7 @@ async def get_next_episode(context, href: str):
         options = await page.query_selector_all("#selectEpisodes option")
 
         episodes = []
+
         for opt in options:
             text = await opt.inner_text()
             value = await opt.get_attribute("value")
@@ -109,7 +139,7 @@ async def get_next_episode(context, href: str):
     return None
 
 
-# ── SCRAPE PLANNING ───────────────────────────
+# ── SCRAPING ────────────────────────────────
 async def scrape_planning_page(page, context, session):
     print("📅 Extraction du planning...")
     planning_data = []
@@ -141,21 +171,38 @@ async def scrape_planning_page(page, context, session):
             badge_elem = await carte.query_selector(".badge-text")
             badge = (await badge_elem.inner_text()).strip() if badge_elem else "Inconnu"
 
+            # ── FLAGS ──
             langues = []
-            if await carte.query_selector('img[title="VF"]'):
-                langues.append("VF")
-            if await carte.query_selector('img[title="VOSTFR"]'):
-                langues.append("VOSTFR")
+            flags_data = []
 
-            # 🔥 lien
+            flags = await carte.query_selector_all("img.flag-icon")
+
+            for f in flags:
+                src = await f.get_attribute("src")
+                title = await f.get_attribute("title")
+
+                flags_data.append({
+                    "src": src,
+                    "title": title
+                })
+
+                if title:
+                    langues.append(title)
+
+            # ── IMAGE ──
+            img_elem = await carte.query_selector("img.card-image")
+            img_url = await img_elem.get_attribute("src") if img_elem else None
+
+            # ── LINK ──
             link_elem = await carte.query_selector("a")
             href = await link_elem.get_attribute("href") if link_elem else None
 
-            # 🔥 épisode
+            # ── EPISODE ──
             next_episode = None
             if href:
                 next_episode = await get_next_episode(context, href)
 
+            # ── IDS ──
             ids = await resolve_ids(session, titre)
             await asyncio.sleep(0.5)
 
@@ -165,8 +212,14 @@ async def scrape_planning_page(page, context, session):
                 "saison": saison,
                 "format": badge,
                 "langue": " & ".join(langues) if langues else "Inconnue",
+
                 "mal_id": ids["mal_id"],
                 "imdb_id": ids["imdb_id"],
+                "kitsu_id": ids["kitsu_id"],
+
+                "image": img_url,
+                "flags": flags_data,
+
                 "url": href,
                 "prochain_episode": next_episode
             })
@@ -175,12 +228,13 @@ async def scrape_planning_page(page, context, session):
 
     total = sum(len(j["animes"]) for j in planning_data)
     print(f"   → {len(planning_data)} jour(s), {total} anime(s) traité(s).")
+
     return planning_data
 
 
-# ── MAIN ──────────────────────────────────────
+# ── MAIN ────────────────────────────────
 async def main():
-    url = "https://anime-sama.to/"
+    url = BASE_URL + "/"
 
     async with aiohttp.ClientSession() as session:
         async with async_playwright() as pw:
