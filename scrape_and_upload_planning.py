@@ -104,7 +104,7 @@ async def scrape_planning_page(page, session: aiohttp.ClientSession) -> list[dic
     print("📅 Extraction du planning...")
     planning_data = []
 
-    jours = await page.query_selector_all("div.fadeJours")
+    jours = await page.wait_for_selector("div.fadeJours", state="attached", timeout=15000)
     for jour in jours:
         titre_elem = await jour.query_selector("h2.titreJours")
         titre_jour = (await titre_elem.inner_text()).strip() if titre_elem else "Jour Inconnu"
