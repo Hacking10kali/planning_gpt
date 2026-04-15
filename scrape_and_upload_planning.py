@@ -28,7 +28,7 @@ def save_json(data, filename: str):
 
 
 # ── ID Lookup ─────────────────────────────────
-async def get_mal_id(session: aiohttp.ClientSession, titre: str) -> int | None:
+async def get_mal_id(session: aiohttp.ClientSession, titre: str):
     try:
         url = "https://api.jikan.moe/v4/anime"
         params = {"q": titre, "limit": 1}
@@ -44,7 +44,7 @@ async def get_mal_id(session: aiohttp.ClientSession, titre: str) -> int | None:
     return None
 
 
-async def get_imdb_id(session: aiohttp.ClientSession, titre: str) -> str | None:
+async def get_imdb_id(session: aiohttp.ClientSession, titre: str):
     try:
         query = titre.replace(" ", "_")
         url = f"https://v2.sg.media-imdb.com/suggestion/x/{query}.json"
@@ -52,8 +52,7 @@ async def get_imdb_id(session: aiohttp.ClientSession, titre: str) -> str | None:
             if resp.status != 200:
                 return None
             data = await resp.json(content_type=None)
-            results = data.get("d", [])
-            for r in results:
+            for r in data.get("d", []):
                 imdb_id = r.get("id", "")
                 if imdb_id.startswith("tt"):
                     return imdb_id
@@ -62,22 +61,24 @@ async def get_imdb_id(session: aiohttp.ClientSession, titre: str) -> str | None:
     return None
 
 
-async def resolve_ids(session: aiohttp.ClientSession, titre: str) -> dict:
+async def resolve_ids(session: aiohttp.ClientSession, titre: str):
     mal_id = await get_mal_id(session, titre)
     if mal_id:
         return {"mal_id": mal_id, "imdb_id": None}
     imdb_id = await get_imdb_id(session, titre)
-    return {"mal_id": None, "imdb_id": imdb_id if imdb_id else None}
+    return {"mal_id": None, "imdb_id": imdb_id}
 
 
-# ── 🔥 AJOUT : FONCTION EPISODE ─────────────────
-async def get_next_episode(page, href: str):
+# ── 🔥 EPISODE (VERSION STABLE SANS GO_BACK) ──
+async def get_next_episode(context, href: str):
     try:
         if not href:
             return None
 
         base_url = "https://anime-sama.to"
         full_url = base_url.rstrip("/") + href
+
+        page = await context.new_page()
 
         await page.goto(full_url, wait_until="domcontentloaded", timeout=30000)
         await page.wait_for_selector("#selectEpisodes", timeout=10000)
@@ -90,6 +91,8 @@ async def get_next_episode(page, href: str):
             if value and value.isdigit():
                 episodes.append(int(value))
 
+        await page.close()
+
         if episodes:
             return max(episodes) + 1
 
@@ -100,11 +103,12 @@ async def get_next_episode(page, href: str):
 
 
 # ── SCRAPE PLANNING ───────────────────────────
-async def scrape_planning_page(page, session: aiohttp.ClientSession) -> list[dict]:
+async def scrape_planning_page(page, context, session):
     print("📅 Extraction du planning...")
     planning_data = []
 
-    jours = await page.wait_for_selector("div.fadeJours", state="attached", timeout=15000)
+    jours = await page.query_selector_all("div.fadeJours")
+
     for jour in jours:
         titre_elem = await jour.query_selector("h2.titreJours")
         titre_jour = (await titre_elem.inner_text()).strip() if titre_elem else "Jour Inconnu"
@@ -112,6 +116,7 @@ async def scrape_planning_page(page, session: aiohttp.ClientSession) -> list[dic
         jour_data = {"jour": titre_jour, "animes": []}
 
         cartes = await jour.query_selector_all("div.anime-card-premium")
+
         for carte in cartes:
             titre_elem = await carte.query_selector(".card-title")
             titre = (await titre_elem.inner_text()).strip() if titre_elem else "Titre Inconnu"
@@ -130,22 +135,21 @@ async def scrape_planning_page(page, session: aiohttp.ClientSession) -> list[dic
             badge = (await badge_elem.inner_text()).strip() if badge_elem else "Inconnu"
 
             langues = []
-            if await carte.query_selector('img[title="VF"]'): langues.append("VF")
-            if await carte.query_selector('img[title="VOSTFR"]'): langues.append("VOSTFR")
+            if await carte.query_selector('img[title="VF"]'):
+                langues.append("VF")
+            if await carte.query_selector('img[title="VOSTFR"]'):
+                langues.append("VOSTFR")
 
-            # ── 🔥 AJOUT : LINK ──
+            # 🔥 LINK
             link_elem = await carte.query_selector("a")
             href = await link_elem.get_attribute("href") if link_elem else None
 
-            # ── 🔥 AJOUT : EPISODE ──
+            # 🔥 EPISODE
             next_episode = None
             if href:
-                next_episode = await get_next_episode(page, href)
+                next_episode = await get_next_episode(context, href)
 
-                # ⚠️ IMPORTANT
-                await page.go_back(wait_until="domcontentloaded")
-                await page.wait_for_selector("div.fadeJours")
-
+            # IDS
             ids = await resolve_ids(session, titre)
             await asyncio.sleep(0.5)
 
@@ -175,6 +179,7 @@ async def main():
     async with aiohttp.ClientSession() as session:
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=True, args=["--no-sandbox"])
+
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                            "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -184,25 +189,28 @@ async def main():
             )
 
             page = await context.new_page()
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+
+            await page.goto(url, wait_until="networkidle", timeout=60000)
+            await asyncio.sleep(2)
 
             try:
                 await page.wait_for_selector("div.fadeJours", timeout=15000)
             except PlaywrightTimeoutError:
                 print("⚠️ Section planning non trouvée.")
 
-            planning = await scrape_planning_page(page, session)
+            planning = await scrape_planning_page(page, context, session)
+
             await browser.close()
 
     if planning:
         save_json(planning, "planning_anime_sama.json")
 
         db = init_firebase()
-        doc_ref = db.collection("planning").document("weekly_planning")
-        doc_ref.set({
+        db.collection("planning").document("weekly_planning").set({
             "last_update": datetime.utcnow().isoformat(),
             "jours": planning
         })
+
         print("🔥 Planning mis à jour dans Firestore !")
 
 
